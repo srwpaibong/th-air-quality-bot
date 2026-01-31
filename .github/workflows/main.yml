@@ -10,6 +10,10 @@ on:
     - cron: '0 0,5,8,10 * * *'
   workflow_dispatch: 
 
+# เพิ่มสิทธิ์ให้บอทสามารถเขียนไฟล์กลับลงใน Repository เพื่อจำค่าประวัติได้
+permissions:
+  contents: write
+
 jobs:
   report:
     runs-on: ubuntu-latest
@@ -29,7 +33,16 @@ jobs:
         env:
           AIR4THAI_KEY: ${{ secrets.AIR4THAI_KEY }}
           GISTDA_API_KEY: ${{ secrets.GISTDA_API_KEY }}
-          TMD_3HR_KEY: ${{ secrets.TMD_3HR_KEY }} # ✅ แมพไปหา Secret ตัวใหม่
+          TMD_3HR_KEY: ${{ secrets.TMD_3HR_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
         run: python bot.py
+
+      # ขั้นตอนเก็บประวัติข้อมูลเพื่อให้บอทเปรียบเทียบแนวโน้มในครั้งถัดไปได้
+      - name: Commit and Push History
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add hotspot_history.json || true
+          git commit -m "Update hotspot history [skip ci]" || true
+          git push || true
