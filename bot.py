@@ -51,6 +51,15 @@ def format_duration(diff):
     if days > 0: return f"{days}ว {hours}ชม"
     return f"{hours}ชม"
 
+def extract_province(area_th):
+    """สกัดชื่อจังหวัดจากข้อความที่อยู่"""
+    if not area_th: return ""
+    parts = area_th.split(',')
+    if len(parts) > 1:
+        prov = parts[-1].strip().replace('จังหวัด', '').replace('จ.', '')
+        return prov
+    return area_th.strip()
+
 def send_tg(text):
     for cid in TELEGRAM_CHAT_IDS:
         if not cid.strip(): continue
@@ -60,40 +69,32 @@ def send_tg(text):
         except: pass
 
 def summarize_weather_impact(full_text):
-    """สรุปข้อความพยากรณ์อากาศยาวๆ ให้เป็น Bullet point สำหรับเจ้าหน้าที่"""
+    """สรุปข้อความพยากรณ์อากาศให้เป็น Bullet point"""
     if not full_text or "ไม่พบข้อมูล" in full_text:
-        return "⚠️ ไม่สามารถวิเคราะห์พยากรณ์อากาศได้"
+        return "⚠️ ข้อมูลพยากรณ์อากาศไม่พร้อมใช้งาน"
     
     summary = []
-    # 1. สรุปสภาวะหลัก (มวลอากาศเย็น/ฝน/หมอก)
-    if "มวลอากาศเย็น" in full_text or "ความกดอากาศสูง" in full_text:
+    if any(k in full_text for k in ["มวลอากาศเย็น", "ความกดอากาศสูง"]):
         summary.append("🌡️ ความกดอากาศสูงแผ่ปกคลุม (อากาศเย็นลง)")
     if "หมอกในตอนเช้า" in full_text:
         summary.append("🌫️ มีหมอกตอนเช้า/ทัศนวิสัยต่ำ")
-    if "ฝนน้อย" in full_text or "ไม่มีฝน" in full_text:
-        summary.append("☀️ ฝนน้อย (ไม่มีปัจจัยช่วยชะล้างฝุ่น)")
-    elif "ฝนเล็กน้อย" in full_text or "มีฝน" in full_text:
-        summary.append("🌧️ มีฝนบางพื้นที่ (ช่วยลดการสะสมฝุ่น)")
+    if any(k in full_text for k in ["ฝนน้อย", "ไม่มีฝน"]):
+        summary.append("☀️ ฝนน้อย (ไม่มีปัจจัยชะล้างฝุ่น)")
+    elif any(k in full_text for k in ["ฝนเล็กน้อย", "มีฝน"]):
+        summary.append("🌧️ มีฝนบางพื้นที่ (ช่วยลดการสะสม)")
 
-    # 2. สรุปการระบายอากาศ
-    if "ระบายอากาศอยู่ในเกณฑ์อ่อน" in full_text or "ไม่ดี" in full_text:
-        summary.append("🌬️ การระบายอากาศ: *เกณฑ์อ่อนถึงไม่ดี* (เสี่ยงสะสม)")
-    elif "ระบายอากาศได้ดี" in full_text:
-        summary.append("🌬️ การระบายอากาศ: *เกณฑ์ดี*")
+    # วิเคราะห์การระบายอากาศ
+    if any(k in full_text for k in ["ระบายอากาศอยู่ในเกณฑ์อ่อน", "ไม่ดี", "อ่อนถึงไม่ดี"]):
+        summary.append("🌬️ การระบายอากาศ: *เกณฑ์อ่อน/ไม่ดี* (เสี่ยงสะสม)")
+    
+    # วิเคราะห์แนวโน้มฝุ่น
+    if any(k in full_text for k in ["ปานกลางถึงค่อนข้างมาก", "สะสมค่อนข้างมาก"]):
+        summary.append("🔴 แนวโน้มฝุ่น: *มีเกณฑ์สะสมเพิ่มขึ้น*")
 
-    # 3. แนวโน้มฝุ่น
-    if "สะสมของฝุ่นละออง...อยู่ในเกณฑ์ปานกลางถึงค่อนข้างมาก" in full_text or "ค่อนข้างมาก" in full_text:
-        summary.append("🔴 แนวโน้มฝุ่น: *สะสมเพิ่มขึ้น/ค่อนข้างมาก*")
-    elif "เกณฑ์น้อย" in full_text:
-        summary.append("🟢 แนวโน้มฝุ่น: *สะสมน้อย*")
+    return "\n".join([f"• {item}" for item in summary]) if summary else f"📝 {full_text[:150]}..."
 
-    if not summary:
-        return f"📝 {full_text[:150]}..."
-        
-    return "\n".join([f"• {item}" for item in summary])
-
-def check_qa_issues_48h(station_id):
-    """ตรวจสอบ QA แบบละเอียด 48 ชม."""
+def check_qa_issues_48h(station_id, is_outdated):
+    """ตรวจสอบ QA ย้อนหลัง 48 ชม. (แยก Missing ออกจาก Outdated)"""
     try:
         now = get_now_th()
         edate = now.strftime('%Y-%m-%d')
@@ -107,19 +108,32 @@ def check_qa_issues_48h(station_id):
         df['PM25'] = pd.to_numeric(df['PM25'], errors='coerce')
         issues = []
         
+        # 1. Spike Check
         if any(df['PM25'].diff().abs() > SPIKE_LIMIT): issues.append("Spike")
         
+        # 2. Missing Data Check (เช็คหา Gap ในอดีต)
+        # กรองข้อมูลที่ไม่ใช่แถวสุดท้าย (เพราะแถวสุดท้ายถ้าหายจะถือเป็น Outdated)
+        historical_pm25 = df['PM25'].iloc[:-1].tolist()
         consecutive_missing = 0
-        has_large_gap = False
-        for val in df['PM25'].tolist():
+        found_historical_missing = False
+        for val in historical_pm25:
             if pd.isna(val) or val == -1:
                 consecutive_missing += 1
-                if consecutive_missing >= MISSING_LIMIT_HRS: has_large_gap = True
+                if consecutive_missing >= MISSING_LIMIT_HRS:
+                    found_historical_missing = True
             else: consecutive_missing = 0
-        if has_large_gap: issues.append(f"Missing(>4h)")
         
-        if any(df['PM25'].tail(12).rolling(window=FLATLINE_LIMIT_HRS).std() == 0): issues.append("Flatline")
-        if any((df['PM25'] < 0) & (df['PM25'] != -1)): issues.append("Negative")
+        # ถ้าปัจจุบันยังอัปเดตอยู่ แต่มี gap ในอดีต ให้ขึ้น Missing
+        if found_historical_missing and not is_outdated:
+            issues.append(f"Missing(>4h)")
+        
+        # 3. Flatline
+        if any(df['PM25'].tail(12).rolling(window=FLATLINE_LIMIT_HRS).std() == 0):
+            issues.append("Flatline")
+            
+        # 4. Negative
+        if any((df['PM25'] < 0) & (df['PM25'] != -1)):
+            issues.append("Negative")
             
         return ", ".join(issues) if issues else None
     except: return None
@@ -127,11 +141,10 @@ def check_qa_issues_48h(station_id):
 def fetch_xml_safe(url, label):
     try:
         res = requests.get(url, headers=HEADERS, timeout=45)
+        # ล้างอักขระพิเศษเพื่อให้ XML Parser ทำงานได้
         content = res.content.decode('utf-8-sig').strip()
         return ET.fromstring(content)
-    except Exception as e:
-        print(f"Error fetching {label}: {e}")
-        return None
+    except: return None
 
 def main():
     now = get_now_th()
@@ -142,7 +155,7 @@ def main():
     gistda_url = "https://api-gateway.gistda.or.th/api/2.0/resources/features/viirs/1day?limit=3000&offset=0&ct_tn=%E0%B8%A3%E0%B8%B2%E0%B8%8A%E0%B8%AD%E0%B8%B2%E0%B8%93%E0%B8%B2%E0%B8%88%E0%B8%B1%E0%B8%81%E0%B8%A3%E0%B9%84%E0%B8%97%E0%B8%A2"
     hotspots_raw = requests.get(gistda_url, headers={**HEADERS, 'API-Key': GISTDA_API_KEY}, timeout=30).json()
     
-    # ดึงพยากรณ์รายวัน (Small XML)
+    # ดึงข้อมูล TMD
     daily_weather_xml = fetch_xml_safe(f"https://data.tmd.go.th/api/DailyForecast/v2/?uid=api&ukey={TMD_DAILY_KEY}", "Daily Forecast")
     weather_3hr_xml = fetch_xml_safe(f"https://data.tmd.go.th/api/Weather3Hours/V2/?uid=api&ukey={TMD_3HR_KEY}", "3Hr Weather")
 
@@ -152,43 +165,49 @@ def main():
     pm24h_vals = [float(s['AQILast']['PM25']['value']) for s in daily_raw.get('stations', []) if s and s.get('AQILast', {}).get('PM25', {}).get('value') is not None and float(s['AQILast']['PM25']['value']) >= 0]
 
     outdated_list, qa_list = [], []
-    qa_candidates = sorted(valid_h, key=lambda x: float(x['hourly_data'].get('PM25', 0)), reverse=True)[:15]
+    outdated_ids = set()
     
+    # 2.1 Identify Outdated Stations
     for s in valid_h:
         st_id, st_name, area = s['StationID'], s['StationNameTh'], s['AreaNameTh']
+        prov = extract_province(area)
         if s.get('last_datetime'):
             try:
                 diff = now - datetime.strptime(s['last_datetime'], "%Y-%m-%d %H:%M:%S").replace(tzinfo=pytz.timezone('Asia/Bangkok'))
                 if diff.total_seconds() > STALE_THRESHOLD_MIN * 60: 
-                    outdated_list.append({'id': st_id, 'name': st_name, 'area': area, 'diff': diff})
-                    if st_id not in [x['StationID'] for x in qa_candidates]: qa_candidates.append(s)
+                    outdated_list.append({'id': st_id, 'name': st_name, 'prov': prov, 'area': area, 'diff': diff})
+                    outdated_ids.add(st_id)
             except: pass
 
+    # 2.2 Identify QA Issues (Exclude current outages from 'Missing' label if needed)
+    qa_candidates = sorted(valid_h, key=lambda x: float(x['hourly_data'].get('PM25', 0)), reverse=True)[:20]
     for s in qa_candidates:
-        issue = check_qa_issues_48h(s['StationID'])
-        if issue: qa_list.append(f"• *[{s['StationID']}]* {s['StationNameTh']}\n  ⚠️ ปัญหา: {issue}")
+        st_id = s['StationID']
+        is_outdated = st_id in outdated_ids
+        issue = check_qa_issues_48h(st_id, is_outdated)
+        if issue:
+            prov = extract_province(s['AreaNameTh'])
+            qa_list.append(f"• *[{st_id}]* {s['StationNameTh']} ({prov})\n  ⚠️ ปัญหา: {issue}")
 
     # --- 3. Weather Analysis ---
     rain_provs, wind_data = [], {}
     if weather_3hr_xml is not None:
         for st in weather_3hr_xml.findall('.//Station'):
-            p_node = st.find('Province')
-            p = p_node.text.strip() if p_node is not None and p_node.text else "N/A"
+            p = st.find('Province').text.strip() if st.find('Province') is not None else "N/A"
             obs = st.find('Observation')
             if obs is not None:
-                r_node = obs.find('Rainfall')
-                if r_node is not None and r_node.text and float(r_node.text) > 0: rain_provs.append(p)
-                w_node = obs.find('WindSpeed')
-                if w_node is not None and w_node.text: wind_data[p] = float(w_node.text)
+                r = obs.find('Rainfall').text
+                if r and float(r) > 0: rain_provs.append(p)
+                w = obs.find('WindSpeed').text
+                if w: wind_data[p] = float(w)
 
     overall_desc_text = "ไม่พบข้อมูลพยากรณ์อากาศ"
     if daily_weather_xml is not None:
-        # แก้ไข Path ให้เข้าถึง OverallDescriptionThai ได้ชัวร์ขึ้น
-        desc_node = daily_weather_xml.find('.//OverallDescriptionThai')
+        # ดึง DailyForecast อันแรกซึ่งคือพยากรณ์ล่าสุด
+        desc_node = daily_weather_xml.find('.//DailyForecast/OverallDescriptionThai')
         if desc_node is not None and desc_node.text:
             overall_desc_text = desc_node.text.strip().replace('\xa0', ' ')
 
-    # เรียกใช้ฟังก์ชันสรุป Bullet point
     weather_bullets = summarize_weather_impact(overall_desc_text)
 
     # --- 4. Hotspots ---
@@ -200,8 +219,6 @@ def main():
     top5_h = sorted(h_provs.items(), key=lambda x: x[1], reverse=True)[:5]
 
     # --- 5. Beautiful Reporting ---
-    
-    # Message 1: สรุปภาพรวม
     msg1 = f"📡 *รายงานคุณภาพอากาศประเทศไทย*\n"
     msg1 += f"📅 {now.strftime('%d/%m/%Y')} | 🕒 {now.strftime('%H:%M')} น.\n"
     msg1 += f"━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -225,7 +242,6 @@ def main():
     msg1 += f"🌧️ *พื้นที่รายงานฝน:* `{', '.join(list(set(rain_provs))[:5]) or 'ไม่มี'}`\n"
     send_tg(msg1)
 
-    # Message 2: รายละเอียดสถานีไม่อัปเดต
     if outdated_list:
         msg2 = "⏳ *สถานีที่หยุดส่งข้อมูล (ปัจจุบัน)*\n"
         msg2 += "━━━━━━━━━━━━━━━━━━━━\n"
@@ -234,22 +250,19 @@ def main():
             if sts:
                 msg2 += f"\n📍 *{reg}* ({cfg['staff']})\n"
                 for rs in sts:
-                    msg2 += f"• `[{rs['id']}]` {rs['name'][:20]}\n  (หยุดส่งข้อมูล: {format_duration(rs['diff'])})\n"
+                    msg2 += f"• `[{rs['id']}]` {rs['name']} ({rs['prov']})\n  (ขาดการติดต่อ: {format_duration(rs['diff'])})\n"
         send_tg(msg2)
 
-    # Message 3: ข้อมูลผิดปกติ (QA)
     if qa_list:
         msg3 = "🚨 *ตรวจพบข้อมูลผิดปกติ (QA 48h)*\n"
         msg3 += "━━━━━━━━━━━━━━━━━━━━\n"
         msg3 += "\n".join(qa_list[:15])
-        msg3 += f"\n\n_ตรวจสอบประวัติย้อนหลังเพื่อยืนยันค่าจริง_"
+        msg3 += f"\n\n_สถานีข้างต้นมีประวัติข้อมูลแหว่งหรือพุ่งสูง_"
         send_tg(msg3)
 
-    # Message 4: Hotspots
     msg4 = f"🔥 *สรุปจุดความร้อน VIIRS (24 ชม.)*\n"
     msg4 += f"พบทั้งหมด `{len(features):,}` จุด\n"
     msg4 += "━━━━━━━━━━━━━━━━━━━━\n\n"
-    msg4 += "🏆 *จังหวัดที่พบจุดสูงสุด*\n"
     for i, (p, c) in enumerate(top5_h, 1):
         msg4 += f"{i}. *{p}* ➔ `{c}` จุด\n"
     send_tg(msg4)
