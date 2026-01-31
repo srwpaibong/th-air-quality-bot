@@ -60,9 +60,10 @@ def check_qa_issues_48h(station_id):
         edate = now.strftime('%Y-%m-%d')
         sdate = (now - timedelta(days=2)).strftime('%Y-%m-%d')
         url = f"http://air4thai.com/forweb/getHistoryData.php?stationID={station_id}&param=PM25&type=hr&sdate={sdate}&edate={edate}&stime=00&etime=23"
-        res = requests.get(url, headers=HEADERS, timeout=15).json()
+        res = requests.get(url, headers=HEADERS, timeout=15)
+        raw_data = res.json()
         
-        stations = res.get('stations', [])
+        stations = raw_data.get('stations', [])
         if not stations: return None
         data_list = stations[0].get('data', [])
         if len(data_list) < 5: return None
@@ -89,10 +90,15 @@ def check_qa_issues_48h(station_id):
     except: return None
 
 def fetch_xml_with_retry(url, label):
+    """ฟังก์ชันดึง XML พร้อมทำความสะอาดข้อมูลเบื้องต้นเพื่อลด Syntax Error"""
     for attempt in range(2):
         try:
             res = requests.get(url, headers=HEADERS, timeout=45)
-            if res.status_code == 200: return ET.fromstring(res.content)
+            if res.status_code == 200:
+                # ล้าง whitespace หัวท้ายและล้างอักขระ BOM เพื่อป้องกัน syntax error
+                content = res.content.decode('utf-8-sig').strip()
+                if content:
+                    return ET.fromstring(content)
         except Exception as e:
             print(f"Fetch {label} failed: {e}")
             time.sleep(5)
@@ -102,11 +108,27 @@ def main():
     now = get_now_th()
     
     # --- 1. Fetch Data ---
-    hourly_raw = requests.get(f"http://air4thai.com/services/getAQI_County.php?key={AIR4THAI_KEY}", headers=HEADERS, timeout=30).json()
-    daily_raw = requests.get("http://air4thai.com/forweb/getAQI_JSON.php", headers=HEADERS, timeout=30).json()
+    hourly_raw = []
+    try:
+        res = requests.get(f"http://air4thai.com/services/getAQI_County.php?key={AIR4THAI_KEY}", headers=HEADERS, timeout=30)
+        hourly_raw = res.json()
+    except Exception as e:
+        print(f"Fetch Air4Thai Hourly failed: {e}")
+
+    daily_raw = {"stations": []}
+    try:
+        res = requests.get("http://air4thai.com/forweb/getAQI_JSON.php", headers=HEADERS, timeout=30)
+        daily_raw = res.json()
+    except Exception as e:
+        print(f"Fetch Air4Thai Daily failed: {e}")
     
     gistda_url = "https://api-gateway.gistda.or.th/api/2.0/resources/features/viirs/1day?limit=1000&offset=0&ct_tn=%E0%B8%A3%E0%B8%B2%E0%B8%8A%E0%B8%AD%E0%B8%B2%E0%B8%93%E0%B8%B2%E0%B8%88%E0%B8%B1%E0%B8%81%E0%B8%A3%E0%B9%84%E0%B8%97%E0%B8%A2"
-    hotspots_raw = requests.get(gistda_url, headers={**HEADERS, 'API-Key': GISTDA_API_KEY}, timeout=30).json()
+    hotspots_raw = {"features": []}
+    try:
+        res = requests.get(gistda_url, headers={**HEADERS, 'API-Key': GISTDA_API_KEY}, timeout=30)
+        hotspots_raw = res.json()
+    except Exception as e:
+        print(f"Fetch GISTDA failed: {e}")
     
     # ดึงพยากรณ์รายวัน (Small XML)
     daily_weather_xml = fetch_xml_with_retry(f"https://data.tmd.go.th/api/DailyForecast/v2/?uid=api&ukey={TMD_DAILY_KEY}", "Daily Forecast")
@@ -115,9 +137,33 @@ def main():
 
     # --- 2. Processing ---
     # Air Quality Validations
-    valid_h = [s for s in hourly_raw if s and isinstance(s, dict) and 'hourly_data' in s]
-    v1h = [float(s['hourly_data']['PM25']) for s in valid_h if s['hourly_data'].get('PM25') is not None and float(s['hourly_data']['PM25']) >= 0]
-    v24h = [float(s['AQILast']['PM25']['value']) for s in daily_raw.get('stations', []) if s.get('AQILast', {}).get('PM25', {}).get('value') is not None and float(s['AQILast']['PM25']['value']) >= 0]
+    if isinstance(hourly_raw, list):
+        # ✅ แก้ไข: เพิ่มเงื่อนไข s.get('hourly_data') is not None เพื่อป้องกัน NoneType Error
+        valid_h = [s for s in hourly_raw if s and isinstance(s, dict) and s.get('hourly_data') is not None]
+    else:
+        valid_h = []
+
+    v1h = []
+    for s in valid_h:
+        val = s.get('hourly_data', {}).get('PM25')
+        if val is not None:
+            try:
+                f_val = float(val)
+                if f_val >= 0:
+                    v1h.append(f_val)
+            except: pass
+
+    daily_stations = daily_raw.get('stations', [])
+    v24h = []
+    if isinstance(daily_stations, list):
+        for s in daily_stations:
+            val = s.get('AQILast', {}).get('PM25', {}).get('value')
+            if val is not None:
+                try:
+                    f_val = float(val)
+                    if f_val >= 0:
+                        v24h.append(f_val)
+                except: pass
 
     outdated_list, qa_list = [], []
     for s in valid_h:
@@ -138,11 +184,14 @@ def main():
     rain_provs, wind_data = [], {}
     if weather_3hr_xml is not None:
         for st in weather_3hr_xml.findall('.//Station'):
-            p = st.find('Province').text.strip() if st.find('Province') is not None else "N/A"
+            p_node = st.find('Province')
+            p = p_node.text.strip() if p_node is not None else "N/A"
             obs = st.find('Observation')
             if obs is not None:
-                if float(obs.find('Rainfall').text or 0) > 0: rain_provs.append(p)
-                if obs.find('WindSpeed') is not None: wind_data[p] = float(obs.find('WindSpeed').text or 0)
+                r_node = obs.find('Rainfall')
+                if r_node is not None and r_node.text and float(r_node.text) > 0: rain_provs.append(p)
+                w_node = obs.find('WindSpeed')
+                if w_node is not None and w_node.text: wind_data[p] = float(w_node.text)
 
     # Weather Description (Daily Forecast)
     overall_desc = "ไม่พบข้อมูลพยากรณ์อากาศ"
@@ -154,7 +203,8 @@ def main():
     features = hotspots_raw.get('features', [])
     h_provs = {}
     for f in features:
-        p = f.get('properties', {}).get('pv_tn', 'N/A')
+        props = f.get('properties', {})
+        p = props.get('pv_tn', 'N/A')
         h_provs[p] = h_provs.get(p, 0) + 1
     top5_h = sorted(h_provs.items(), key=lambda x: x[1], reverse=True)[:5]
 
