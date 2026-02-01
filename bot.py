@@ -8,7 +8,7 @@ import pandas as pd
 import time
 import re
 
-# ===== CONFIGURATION =====
+# ===== CONFIGURATION (Environment Variables) =====
 AIR4THAI_KEY = os.getenv('AIR4THAI_KEY')
 GISTDA_API_KEY = os.getenv('GISTDA_API_KEY')
 TMD_3HR_KEY = os.getenv('TMD_3HR_KEY')
@@ -57,6 +57,7 @@ def extract_province(area_th):
     parts = area_th.split(',')
     if len(parts) > 1:
         prov = parts[-1].strip().replace('จังหวัด', '').replace('จ.', '')
+        if "กรุงเทพ" in prov: return "กรุงเทพฯ"
         return prov
     return area_th.strip()
 
@@ -69,63 +70,71 @@ def send_tg(text):
         except: pass
 
 def summarize_weather_impact(full_text):
-    """สรุปข้อความพยากรณ์อากาศให้เป็น Bullet point"""
+    """สรุปข้อความพยากรณ์อากาศให้เป็น Bullet point สำหรับเจ้าหน้าที่เพื่อเฝ้าระวังฝุ่น"""
     if not full_text or "ไม่พบข้อมูล" in full_text:
-        return "⚠️ ข้อมูลพยากรณ์อากาศไม่พร้อมใช้งาน"
+        return "⚠️ ข้อมูลพยากรณ์อากาศจาก TMD ไม่พร้อมใช้งาน"
     
     summary = []
+    # วิเคราะห์ปัจจัยอากาศ
     if any(k in full_text for k in ["มวลอากาศเย็น", "ความกดอากาศสูง"]):
-        summary.append("🌡️ ความกดอากาศสูงแผ่ปกคลุม (อากาศเย็นลง)")
-    if "หมอกในตอนเช้า" in full_text:
-        summary.append("🌫️ มีหมอกตอนเช้า/ทัศนวิสัยต่ำ")
+        summary.append("🌡️ *สภาวะอากาศ:* มวลอากาศเย็นแผ่ปกคลุม (อากาศนิ่ง/เย็นลง)")
+    if "หมอกในตอนเช้า" in full_text or "หมอกหนา" in full_text:
+        summary.append("🌫️ *ทัศนวิสัย:* มีหมอกตอนเช้า (ระวังเพดานอากาศต่ำ)")
     if any(k in full_text for k in ["ฝนน้อย", "ไม่มีฝน"]):
-        summary.append("☀️ ฝนน้อย (ไม่มีปัจจัยชะล้างฝุ่น)")
-    elif any(k in full_text for k in ["ฝนเล็กน้อย", "มีฝน"]):
-        summary.append("🌧️ มีฝนบางพื้นที่ (ช่วยลดการสะสม)")
+        summary.append("☀️ *ปัจจัยชะล้าง:* ฝนน้อย (ไม่มีลม/ฝนช่วยลดฝุ่น)")
+    elif any(k in full_text for k in ["มีฝน", "ฝนฟ้าคะนอง"]):
+        summary.append("🌧️ *ปัจจัยชะล้าง:* มีฝนบางพื้นที่ (ช่วยลดการสะสม)")
 
-    # วิเคราะห์การระบายอากาศ
-    if any(k in full_text for k in ["ระบายอากาศอยู่ในเกณฑ์อ่อน", "ไม่ดี", "อ่อนถึงไม่ดี"]):
-        summary.append("🌬️ การระบายอากาศ: *เกณฑ์อ่อน/ไม่ดี* (เสี่ยงสะสม)")
+    # วิเคราะห์การระบายอากาศและแนวโน้ม
+    if any(k in full_text for k in ["ระบายอากาศอยู่ในเกณฑ์อ่อน", "ไม่ดี", "ระบายอากาศได้ไม่ดี"]):
+        summary.append("🌬️ *การระบายอากาศ:* เกณฑ์อ่อน/ไม่ดี (เสี่ยงสะสมสูง)")
     
-    # วิเคราะห์แนวโน้มฝุ่น
-    if any(k in full_text for k in ["ปานกลางถึงค่อนข้างมาก", "สะสมค่อนข้างมาก"]):
-        summary.append("🔴 แนวโน้มฝุ่น: *มีเกณฑ์สะสมเพิ่มขึ้น*")
+    if any(k in full_text for k in ["สะสม...อยู่ในเกณฑ์ปานกลางถึงค่อนข้างมาก", "สะสมค่อนข้างมาก"]):
+        summary.append("🔴 *แนวโน้มฝุ่น:* คาดการณ์สะสมเพิ่มขึ้น (เฝ้าระวังพิเศษ)")
 
-    return "\n".join([f"• {item}" for item in summary]) if summary else f"📝 {full_text[:150]}..."
+    if not summary:
+        return f"📝 {full_text[:200]}..."
+        
+    return "\n".join([f"• {item}" for item in summary])
 
-def check_qa_issues_48h(station_id, is_outdated):
-    """ตรวจสอบ QA ย้อนหลัง 48 ชม. (แยก Missing ออกจาก Outdated)"""
+def check_qa_issues_48h(station_id, is_currently_outdated):
+    """ตรวจสอบ QA ย้อนหลัง 48 ชม. โดยแยกแยะ Missing ออกจาก Outdated"""
     try:
         now = get_now_th()
         edate = now.strftime('%Y-%m-%d')
         sdate = (now - timedelta(days=2)).strftime('%Y-%m-%d')
         url = f"http://air4thai.com/forweb/getHistoryData.php?stationID={station_id}&param=PM25&type=hr&sdate={sdate}&edate={edate}&stime=00&etime=23"
         res = requests.get(url, headers=HEADERS, timeout=20)
-        data = res.json().get('stations', [{}])[0].get('data', [])
-        if not data: return None
+        json_data = res.json()
         
-        df = pd.DataFrame(data)
+        stations = json_data.get('stations', [])
+        if not stations: return None
+        
+        data_list = stations[0].get('data', [])
+        if not data_list: return None
+        
+        df = pd.DataFrame(data_list)
         df['PM25'] = pd.to_numeric(df['PM25'], errors='coerce')
+        
         issues = []
         
         # 1. Spike Check
-        if any(df['PM25'].diff().abs() > SPIKE_LIMIT): issues.append("Spike")
+        if any(df['PM25'].diff().abs() > SPIKE_LIMIT):
+            issues.append("Spike")
         
-        # 2. Missing Data Check (เช็คหา Gap ในอดีต)
-        # กรองข้อมูลที่ไม่ใช่แถวสุดท้าย (เพราะแถวสุดท้ายถ้าหายจะถือเป็น Outdated)
-        historical_pm25 = df['PM25'].iloc[:-1].tolist()
-        consecutive_missing = 0
-        found_historical_missing = False
-        for val in historical_pm25:
-            if pd.isna(val) or val == -1:
-                consecutive_missing += 1
-                if consecutive_missing >= MISSING_LIMIT_HRS:
-                    found_historical_missing = True
-            else: consecutive_missing = 0
-        
-        # ถ้าปัจจุบันยังอัปเดตอยู่ แต่มี gap ในอดีต ให้ขึ้น Missing
-        if found_historical_missing and not is_outdated:
-            issues.append(f"Missing(>4h)")
+        # 2. Missing Data Check (Gaps in history)
+        if not is_currently_outdated:
+            consecutive_missing = 0
+            has_history_gap = False
+            for val in df['PM25'].tolist():
+                if pd.isna(val) or val == -1:
+                    consecutive_missing += 1
+                    if consecutive_missing >= MISSING_LIMIT_HRS:
+                        has_history_gap = True
+                else:
+                    consecutive_missing = 0
+            if has_history_gap:
+                issues.append(f"Missing(>4h)")
         
         # 3. Flatline
         if any(df['PM25'].tail(12).rolling(window=FLATLINE_LIMIT_HRS).std() == 0):
@@ -136,28 +145,44 @@ def check_qa_issues_48h(station_id, is_outdated):
             issues.append("Negative")
             
         return ", ".join(issues) if issues else None
-    except: return None
+    except:
+        return None
 
 def fetch_xml_safe(url, label):
+    """ฟังก์ชันดึง XML พร้อมทำความสะอาดอักขระพิเศษเพื่อป้องกัน Parser Error"""
     try:
         res = requests.get(url, headers=HEADERS, timeout=45)
-        # ล้างอักขระพิเศษเพื่อให้ XML Parser ทำงานได้
+        if res.status_code != 200: 
+            print(f"[{label}] API Error: {res.status_code}")
+            return None
         content = res.content.decode('utf-8-sig').strip()
+        if not content: return None
         return ET.fromstring(content)
-    except: return None
+    except Exception as e:
+        print(f"Error fetching {label}: {e}")
+        return None
 
 def main():
     now = get_now_th()
+    print(f"=== Starting Report Job at {now.strftime('%Y-%m-%d %H:%M:%S')} ===")
     
     # --- 1. Fetch Data ---
-    hourly_raw = requests.get(f"http://air4thai.com/services/getAQI_County.php?key={AIR4THAI_KEY}", headers=HEADERS, timeout=30).json()
-    daily_raw = requests.get("http://air4thai.com/forweb/getAQI_JSON.php", headers=HEADERS, timeout=30).json()
-    gistda_url = "https://api-gateway.gistda.or.th/api/2.0/resources/features/viirs/1day?limit=3000&offset=0&ct_tn=%E0%B8%A3%E0%B8%B2%E0%B8%8A%E0%B8%AD%E0%B8%B2%E0%B8%93%E0%B8%B2%E0%B8%88%E0%B8%B1%E0%B8%81%E0%B8%A3%E0%B9%84%E0%B8%97%E0%B8%A2"
-    hotspots_raw = requests.get(gistda_url, headers={**HEADERS, 'API-Key': GISTDA_API_KEY}, timeout=30).json()
-    
-    # ดึงข้อมูล TMD
-    daily_weather_xml = fetch_xml_safe(f"https://data.tmd.go.th/api/DailyForecast/v2/?uid=api&ukey={TMD_DAILY_KEY}", "Daily Forecast")
-    weather_3hr_xml = fetch_xml_safe(f"https://data.tmd.go.th/api/Weather3Hours/V2/?uid=api&ukey={TMD_3HR_KEY}", "3Hr Weather")
+    try:
+        print("Fetching Air4Thai data...")
+        hourly_raw = requests.get(f"http://air4thai.com/services/getAQI_County.php?key={AIR4THAI_KEY}", headers=HEADERS, timeout=30).json()
+        daily_raw = requests.get("http://air4thai.com/forweb/getAQI_JSON.php", headers=HEADERS, timeout=30).json()
+        
+        print("Fetching GISTDA data...")
+        gistda_url = "https://api-gateway.gistda.or.th/api/2.0/resources/features/viirs/1day?limit=3000&offset=0&ct_tn=%E0%B8%A3%E0%B8%B2%E0%B8%8A%E0%B8%AD%E0%B8%B2%E0%B8%93%E0%B8%B2%E0%B8%88%E0%B8%B1%E0%B8%81%E0%B8%A3%E0%B9%84%E0%B8%97%E0%B8%A2"
+        hotspots_raw = requests.get(gistda_url, headers={**HEADERS, 'API-Key': GISTDA_API_KEY}, timeout=30).json()
+        
+        print("Fetching TMD data...")
+        daily_weather_xml = fetch_xml_safe(f"https://data.tmd.go.th/api/DailyForecast/v2/?uid=api&ukey={TMD_DAILY_KEY}", "Daily Forecast")
+        weather_3hr_xml = fetch_xml_safe(f"https://data.tmd.go.th/api/Weather3Hours/V2/?uid=api&ukey={TMD_3HR_KEY}", "3Hr Weather")
+    except Exception as e:
+        print(f"Critical error fetching initial data: {e}")
+        send_tg(f"❌ บอททำงานขัดข้องขณะดึงข้อมูล: {e}")
+        return
 
     # --- 2. Processing Air Quality & QA ---
     valid_h = [s for s in hourly_raw if s and isinstance(s, dict) and s.get('hourly_data')]
@@ -167,7 +192,7 @@ def main():
     outdated_list, qa_list = [], []
     outdated_ids = set()
     
-    # 2.1 Identify Outdated Stations
+    # Identify Outdated Stations
     for s in valid_h:
         st_id, st_name, area = s['StationID'], s['StationNameTh'], s['AreaNameTh']
         prov = extract_province(area)
@@ -175,16 +200,15 @@ def main():
             try:
                 diff = now - datetime.strptime(s['last_datetime'], "%Y-%m-%d %H:%M:%S").replace(tzinfo=pytz.timezone('Asia/Bangkok'))
                 if diff.total_seconds() > STALE_THRESHOLD_MIN * 60: 
-                    outdated_list.append({'id': st_id, 'name': st_name, 'prov': prov, 'area': area, 'diff': diff})
+                    outdated_list.append({'id': st_id, 'name': st_name, 'prov': prov, 'diff': diff})
                     outdated_ids.add(st_id)
             except: pass
 
-    # 2.2 Identify QA Issues (Exclude current outages from 'Missing' label if needed)
-    qa_candidates = sorted(valid_h, key=lambda x: float(x['hourly_data'].get('PM25', 0)), reverse=True)[:20]
+    # Identify QA Issues
+    qa_candidates = sorted(valid_h, key=lambda x: float(x['hourly_data'].get('PM25', 0)), reverse=True)[:15]
     for s in qa_candidates:
         st_id = s['StationID']
-        is_outdated = st_id in outdated_ids
-        issue = check_qa_issues_48h(st_id, is_outdated)
+        issue = check_qa_issues_48h(st_id, st_id in outdated_ids)
         if issue:
             prov = extract_province(s['AreaNameTh'])
             qa_list.append(f"• *[{st_id}]* {s['StationNameTh']} ({prov})\n  ⚠️ ปัญหา: {issue}")
@@ -196,14 +220,12 @@ def main():
             p = st.find('Province').text.strip() if st.find('Province') is not None else "N/A"
             obs = st.find('Observation')
             if obs is not None:
-                r = obs.find('Rainfall').text
+                r, w = obs.find('Rainfall').text, obs.find('WindSpeed').text
                 if r and float(r) > 0: rain_provs.append(p)
-                w = obs.find('WindSpeed').text
                 if w: wind_data[p] = float(w)
 
     overall_desc_text = "ไม่พบข้อมูลพยากรณ์อากาศ"
     if daily_weather_xml is not None:
-        # ดึง DailyForecast อันแรกซึ่งคือพยากรณ์ล่าสุด
         desc_node = daily_weather_xml.find('.//DailyForecast/OverallDescriptionThai')
         if desc_node is not None and desc_node.text:
             overall_desc_text = desc_node.text.strip().replace('\xa0', ' ')
@@ -219,6 +241,7 @@ def main():
     top5_h = sorted(h_provs.items(), key=lambda x: x[1], reverse=True)[:5]
 
     # --- 5. Beautiful Reporting ---
+    print("Preparing messages...")
     msg1 = f"📡 *รายงานคุณภาพอากาศประเทศไทย*\n"
     msg1 += f"📅 {now.strftime('%d/%m/%Y')} | 🕒 {now.strftime('%H:%M')} น.\n"
     msg1 += f"━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -246,18 +269,18 @@ def main():
         msg2 = "⏳ *สถานีที่หยุดส่งข้อมูล (ปัจจุบัน)*\n"
         msg2 += "━━━━━━━━━━━━━━━━━━━━\n"
         for reg, cfg in REGION_CONFIG.items():
-            sts = [x for x in outdated_list if any(p in x['area'] for p in cfg['prov'])]
+            sts = [x for x in outdated_list if any(p in x['prov'] for p in cfg['prov'])]
             if sts:
                 msg2 += f"\n📍 *{reg}* ({cfg['staff']})\n"
                 for rs in sts:
-                    msg2 += f"• `[{rs['id']}]` {rs['name']} ({rs['prov']})\n  (ขาดการติดต่อ: {format_duration(rs['diff'])})\n"
+                    msg2 += f"• `[{rs['id']}]` {rs['name']} ({rs['prov']})\n  (หยุดส่งข้อมูล: {format_duration(rs['diff'])})\n"
         send_tg(msg2)
 
     if qa_list:
         msg3 = "🚨 *ตรวจพบข้อมูลผิดปกติ (QA 48h)*\n"
         msg3 += "━━━━━━━━━━━━━━━━━━━━\n"
         msg3 += "\n".join(qa_list[:15])
-        msg3 += f"\n\n_สถานีข้างต้นมีประวัติข้อมูลแหว่งหรือพุ่งสูง_"
+        msg3 += f"\n\n_ตรวจสอบประวัติย้อนหลังเพื่อความต่อเนื่อง_"
         send_tg(msg3)
 
     msg4 = f"🔥 *สรุปจุดความร้อน VIIRS (24 ชม.)*\n"
@@ -266,6 +289,7 @@ def main():
     for i, (p, c) in enumerate(top5_h, 1):
         msg4 += f"{i}. *{p}* ➔ `{c}` จุด\n"
     send_tg(msg4)
+    print("Done. All messages sent.")
 
 if __name__ == "__main__":
     main()
