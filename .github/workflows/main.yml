@@ -2,15 +2,11 @@ name: Air Quality Daily Report
 
 on:
   schedule:
-    # เวลา UTC (ไทยลบออก 7 ชม.)
-    # 07:00 TH = 00:00 UTC
-    # 12:00 TH = 05:00 UTC
-    # 15:00 TH = 08:00 UTC
-    # 17:00 TH = 10:00 UTC
+    # 07:00 TH = 00:00 UTC, 12:00 TH = 05:00 UTC
+    # 15:00 TH = 08:00 UTC, 17:00 TH = 10:00 UTC
     - cron: '0 0,5,8,10 * * *'
   workflow_dispatch: 
 
-# เพิ่มสิทธิ์ให้บอทสามารถเขียนไฟล์กลับลงใน Repository เพื่อจำค่าประวัติได้
 permissions:
   contents: write
 
@@ -27,22 +23,22 @@ jobs:
           python-version: '3.9'
 
       - name: Install Dependencies
-        run: pip install -r requirements.txt
+        run: pip install requests pytz pandas
 
       - name: Run Bot Script
         env:
           AIR4THAI_KEY: ${{ secrets.AIR4THAI_KEY }}
           GISTDA_API_KEY: ${{ secrets.GISTDA_API_KEY }}
           TMD_3HR_KEY: ${{ secrets.TMD_3HR_KEY }}
+          TMD_DAILY_KEY: ${{ secrets.TMD_DAILY_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
         run: python bot.py
 
-      # ขั้นตอนเก็บประวัติข้อมูลเพื่อให้บอทเปรียบเทียบแนวโน้มในครั้งถัดไปได้
-      - name: Commit and Push History
+      - name: Commit History
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add hotspot_history.json || true
-          git commit -m "Update hotspot history [skip ci]" || true
+          git commit -m "Update history [skip ci]" || true
           git push || true
