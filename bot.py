@@ -65,7 +65,7 @@ def send_tg(text):
         if not cid.strip(): continue
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-            requests.post(url, json={"chat_id": cid.strip(), "text": text, "parse_mode": "Markdown"}, timeout=15)
+            requests.post(url, json={"chat_id": cid.strip(), "text": text, "parse_mode": "Markdown"}, timeout=20)
         except: pass
 
 def summarize_weather_impact(full_text):
@@ -94,7 +94,7 @@ def check_qa_issues_48h(station_id, is_currently_outdated):
         edate = now.strftime('%Y-%m-%d')
         sdate = (now - timedelta(days=2)).strftime('%Y-%m-%d')
         url = f"http://air4thai.com/forweb/getHistoryData.php?stationID={station_id}&param=PM25&type=hr&sdate={sdate}&edate={edate}&stime=00&etime=23"
-        res = requests.get(url, headers=HEADERS, timeout=20)
+        res = requests.get(url, headers=HEADERS, timeout=25)
         data = res.json().get('stations', [{}])[0].get('data', [])
         if not data: return None
         
@@ -117,7 +117,6 @@ def check_qa_issues_48h(station_id, is_currently_outdated):
     except: return None
 
 def safe_fetch_json(url, label, headers=None, timeout=30):
-    """ฟังก์ชันดึงข้อมูล JSON พร้อมระบบ Retry และ Fault Tolerance"""
     for attempt in range(3):
         try:
             res = requests.get(url, headers=headers or HEADERS, timeout=timeout)
@@ -128,8 +127,8 @@ def safe_fetch_json(url, label, headers=None, timeout=30):
             if attempt < 2: time.sleep(10)
     return None
 
-def fetch_xml_safe(url, label, timeout=60):
-    """ขยายเวลา Timeout สำหรับ TMD XML"""
+def fetch_xml_safe(url, label, timeout=90):
+    """ขยายเวลา Timeout และล้างอักขระพิเศษสำหรับ XML Parser"""
     try:
         res = requests.get(url, headers=HEADERS, timeout=timeout)
         if res.status_code != 200: return None
@@ -141,14 +140,15 @@ def fetch_xml_safe(url, label, timeout=60):
 
 def main():
     now = get_now_th()
-    print(f"=== Job Started at {now} ===")
+    yesterday_str = (now - timedelta(days=1)).strftime('%Y-%m-%d') # หาวันที่ "เมื่อวาน"
+    print(f"=== Job Started at {now} (Target Yesterday: {yesterday_str}) ===")
     
     # --- 1. Fetch Data ---
     hourly_raw = safe_fetch_json(f"http://air4thai.com/services/getAQI_County.php?key={AIR4THAI_KEY}", "Air4Thai Hourly")
     daily_raw = safe_fetch_json("http://air4thai.com/forweb/getAQI_JSON.php", "Air4Thai Daily")
     
-    # เพิ่ม Limit เป็น 5000 เผื่อวันไฟเยอะ แต่จะใช้โค้ดกรองเฉพาะไทยอีกครั้ง
-    gistda_url = "https://api-gateway.gistda.or.th/api/2.0/resources/features/viirs/1day?limit=5000&offset=0&ct_tn=%E0%B8%A3%E0%B8%B2%E0%B8%8A%E0%B8%AD%E0%B8%B2%E0%B8%93%E0%B8%B2%E0%B8%88%E0%B8%B1%E0%B8%81%E0%B8%A3%E0%B9%84%E0%B8%97%E0%B8%A2"
+    # เพิ่ม Limit ให้ครอบคลุม แต่เราจะกรองวันที่ในโค้ดอีกครั้ง
+    gistda_url = f"https://api-gateway.gistda.or.th/api/2.0/resources/features/viirs/1day?limit=5000&offset=0&ct_tn=%E0%B8%A3%E0%B8%B2%E0%B8%8A%E0%B8%AD%E0%B8%B2%E0%B8%93%E0%B8%B2%E0%B8%88%E0%B8%B1%E0%B8%81%E0%B8%A3%E0%B9%84%E0%B8%97%E0%B8%A2"
     hotspots_raw = safe_fetch_json(gistda_url, "GISTDA", headers={**HEADERS, 'API-Key': GISTDA_API_KEY}, timeout=60)
     
     daily_weather_xml = fetch_xml_safe(f"https://data.tmd.go.th/api/DailyForecast/v2/?uid=api&ukey={TMD_DAILY_KEY}", "Daily Forecast", timeout=60)
@@ -183,7 +183,7 @@ def main():
             prov = extract_province(s['AreaNameTh'])
             qa_list.append(f"• *[{st_id}]* {s['StationNameTh']} ({prov})\n  ⚠️ ปัญหา: {issue}")
 
-    # --- 3. Weather ---
+    # --- 3. Weather Analysis ---
     rain_provs, wind_data = [], {}
     if weather_3hr_xml is not None:
         for st in weather_3hr_xml.findall('.//Station'):
@@ -203,14 +203,20 @@ def main():
 
     weather_bullets = summarize_weather_impact(overall_desc_text)
 
-    # --- 4. Hotspots (Fixing the count to match official Thailand report) ---
+    # --- 4. Hotspots (STRICT FILTERING BY DATE AND COUNTRY) ---
     all_features = hotspots_raw.get('features', []) if hotspots_raw else []
     
-    # กรองเฉพาะจุดความร้อนที่อยู่ในประเทศไทยจริงๆ (เช็ค ct_tn)
-    th_features = [f for f in all_features if f.get('properties', {}).get('ct_tn') in ['ไทย', 'ราชอาณาจักรไทย']]
+    # กรองเฉพาะจุดความร้อนที่เป็น:
+    # 1. th_date ตรงกับวันที่เมื่อวาน (เช่น 2026-03-26)
+    # 2. ct_tn เป็นประเทศไทย
+    th_yesterday_features = [
+        f for f in all_features 
+        if f.get('properties', {}).get('th_date', '').startswith(yesterday_str)
+        and f.get('properties', {}).get('ct_tn') in ['ไทย', 'ราชอาณาจักรไทย']
+    ]
     
     h_provs = {}
-    for f in th_features:
+    for f in th_yesterday_features:
         p = f.get('properties', {}).get('pv_tn', 'ไม่ระบุ')
         h_provs[p] = h_provs.get(p, 0) + 1
     top5_h = sorted(h_provs.items(), key=lambda x: x[1], reverse=True)[:5]
@@ -249,10 +255,11 @@ def main():
 
     msg4 = f"🔥 *สรุปจุดความร้อน VIIRS - ประเทศไทย*\n"
     msg4 += f"ประจำวันที่: {(now - timedelta(days=1)).strftime('%d/%m/%Y')}\n"
-    msg4 += f"พบทั้งหมด `{len(th_features):,}` จุด\n"
+    msg4 += f"พบทั้งหมด `{len(th_yesterday_features):,}` จุด\n"
     msg4 += "━━━━━━━━━━━━━━━━━━━━\n\n"
     if not hotspots_raw: msg4 += "⚠️ _ไม่สามารถดึงข้อมูล GISTDA ได้ในรอบนี้_\n"
-    for i, (p, c) in enumerate(top5_h, 1): msg4 += f"{i}. *{p}* ➔ `{c}` จุด\n"
+    for i, (p, c) in enumerate(top5_h, 1):
+        msg4 += f"{i}. *{p}* ➔ `{c}` จุด\n"
     send_tg(msg4)
 
 if __name__ == "__main__":
